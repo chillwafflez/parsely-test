@@ -8,6 +8,7 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.db import engine
 from app.routers import document_types as document_types_router
+from app.routers import templates as templates_router
 from app.services.blob_storage import BlobStorageService
 from app.services.document_intelligence import DocumentIntelligenceService
 from app.services.layout_storage import LayoutStorageService
@@ -51,6 +52,7 @@ app.add_middleware(
 
 
 app.include_router(document_types_router.router)
+app.include_router(templates_router.router)
 
 
 @app.get("/health")

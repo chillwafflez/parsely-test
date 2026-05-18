@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import IntEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
 from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, SmallInteger
@@ -54,7 +54,7 @@ class Document(SQLModel, table=True):
         ),
     )
 
-    template: "Template | None" = Relationship()
+    template: Optional["Template"] = Relationship()
     extracted_fields: list["ExtractedField"] = Relationship(
         back_populates="document",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
