@@ -39,6 +39,34 @@ curl http://localhost:5181/health
 
 A 200 response means: env loaded, Neon reachable, FastAPI is up.
 
+## Pointing the Next.js frontend at this backend
+
+The frontend defaults to `http://localhost:5180` (.NET). To cut it over to FastAPI:
+
+```powershell
+# in web/
+copy .env.local.example .env.local
+# Edit .env.local — uncomment the NEXT_PUBLIC_API_BASE_URL line
+```
+
+```
+NEXT_PUBLIC_API_BASE_URL=http://localhost:5181
+```
+
+Restart `pnpm dev`. The frontend now talks to FastAPI for everything *except* the voice-fill feature — `/api/voice/token` and `/api/voice/fill` haven't been ported yet (Phase 1.5). The voice button will 404 against FastAPI until then; the rest of the parse → correct → template loop works end-to-end.
+
+## End-to-end parity smoke test
+
+With FastAPI running on `:5181` and frontend pointing at it:
+
+1. Open `http://localhost:3000`
+2. Upload `samples/sample-invoice.pdf` (or any sample under `samples/`)
+3. Verify: review stage renders, bounding boxes align with PDF, fields list is populated
+4. Edit one field's value inline
+5. Save as template (name it anything, e.g. "Smoke")
+6. Upload `samples/sample-invoice-updated.pdf` (same vendor)
+7. Verify: Inspector header shows "Template: Smoke" — auto-match fired
+
 ## Layout (final shape)
 
 ```
