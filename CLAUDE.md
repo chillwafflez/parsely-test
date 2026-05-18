@@ -9,6 +9,7 @@ All-in-one document parsing SaaS with a **correction + save-as-template** workfl
 3. **`memory/MEMORY.md`** — persisted user and project memories.
 4. Code.
 5. Feature-specific design docs in `context/`, loaded only when you're working on that feature:
+   - `context/FASTAPI_PORT.md` — **Practice-rewrite state.** FastAPI/Pydantic/Neon replica of the .NET backend at `api-py/`. Read this BEFORE touching `api-py/` — captures gotchas the code alone won't reveal.
    - `context/VOICE_FEATURE.md` — Voice-fill feature implementation brief (Phases 1–4 shipped 2026-04-22 → 2026-04-23).
    - `context/TEMPLATES_PAGE.md` — Templates management surface (index page + edit page + duplicate). Frozen 2026-04-23, **not yet implemented**.
 
