@@ -15,6 +15,9 @@ dependencies = [
     "python-multipart>=0.0.20",
     "azure-ai-documentintelligence>=1.0.0",
     "azure-storage-blob>=12.24",
+    # Async transport backend used by both Azure SDKs above. Not pulled in
+    # transitively — Azure SDKs support multiple backends and let the app pick.
+    "aiohttp>=3.10",
 ]
 
 [tool.uv]

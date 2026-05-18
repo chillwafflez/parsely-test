@@ -9,9 +9,16 @@ from sqlmodel import SQLModel
 from app.config import get_settings
 from app.db import to_asyncpg_url
 
-# Importing model modules here registers them on SQLModel.metadata so
-# Alembic's autogenerate can see them. Empty until stage 1b adds models.
-# Example (later): from app.models import document, template  # noqa: F401
+# Importing the models package registers every entity on SQLModel.metadata
+# so Alembic's autogenerate can see them.
+from app.models import (  # noqa: F401
+    Document,
+    ExtractedField,
+    ExtractedTable,
+    Template,
+    TemplateAggregationRule,
+    TemplateFieldRule,
+)
 
 
 config = context.config
