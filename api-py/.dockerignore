@@ -1,0 +1,39 @@
+# Anything listed here is excluded from the build context sent to the
+# Docker daemon. Smaller context = faster builds + zero risk of secrets
+# or junk leaking into image layers.
+
+# Python bytecode + caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local virtual environment — never copy into the image. The image
+# builds its own venv in the builder stage.
+.venv/
+
+# Secrets — never put .env files in an image layer. CLAUDE.md says we
+# don't even read these; double belt with the .dockerignore.
+.env
+.env.*
+
+# Git metadata
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Build artifacts
+build/
+dist/
+
+# Docs that the runtime doesn't need
+README.md
+
+# The Dockerfile itself doesn't need to be inside the image
+Dockerfile
+.dockerignore
