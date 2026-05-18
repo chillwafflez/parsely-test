@@ -5,10 +5,11 @@ All-in-one document parsing SaaS with a **correction + save-as-template** workfl
 ## Read order for a new session
 
 1. **This file** — rules and commands.
-2. **`context/PROJECT_CONTEXT.md`** — full architecture, day-by-day build log, gotchas, and roadmap. The other Claude session keeps this current.
-3. **`memory/MEMORY.md`** — persisted user and project memories.
-4. Code.
-5. Feature-specific design docs in `context/`, loaded only when you're working on that feature:
+2. **`context/PRACTICE_PROJECT.md`** — *why* this repo is being rewritten. The developer is practicing their company's incoming tech stack (Neon, FastAPI, K8s, Keycloak, Flutter, OpenTofu, …) on this hackathon project. Read this to understand the goal + architecture decisions + phased plan before anything else makes sense.
+3. **`context/PROJECT_CONTEXT.md`** — full architecture, day-by-day build log, gotchas, and roadmap for the original .NET app. Behavioral source of truth for the port.
+4. **`memory/MEMORY.md`** — Claude Code's local per-machine memory cache (lives at `~/.claude/projects/<slug>/memory/`, not in the repo). Mirrors `context/PRACTICE_PROJECT.md`; the repo doc wins on conflict.
+5. Code.
+6. Feature-specific design docs in `context/`, loaded only when you're working on that feature:
    - `context/FASTAPI_PORT.md` — **Practice-rewrite state.** FastAPI/Pydantic/Neon replica of the .NET backend at `api-py/`. Read this BEFORE touching `api-py/` — captures gotchas the code alone won't reveal.
    - `context/VOICE_FEATURE.md` — Voice-fill feature implementation brief (Phases 1–4 shipped 2026-04-22 → 2026-04-23).
    - `context/TEMPLATES_PAGE.md` — Templates management surface (index page + edit page + duplicate). Frozen 2026-04-23, **not yet implemented**.

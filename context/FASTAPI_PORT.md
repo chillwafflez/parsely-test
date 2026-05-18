@@ -3,9 +3,8 @@
 Tracks the **practice rewrite** of the .NET backend into FastAPI + SQLModel + Neon. The original `api/` is the canonical spec; this doc tracks the replica at `api-py/` and what's different.
 
 **Sibling docs**
+- `context/PRACTICE_PROJECT.md` — *why* this rewrite exists at all (goal + architecture + phased plan). **Read first** if you're a fresh session.
 - `context/PROJECT_CONTEXT.md` — .NET project spec (the source of truth for behavior)
-- `memory/practice_architecture.md` — *why* we made each architecture choice
-- `memory/practice_phased_plan.md` — phase ordering for the broader stack-adoption practice
 
 ---
 
@@ -66,14 +65,14 @@ The Next.js frontend (`web/`) is unchanged from the .NET-era code. Cutover is on
 
 ## What's next
 
-Per `memory/practice_phased_plan.md`:
+Per `context/PRACTICE_PROJECT.md`:
 
 1. ✅ Phase 1 — FastAPI + Neon backend
 2. (optional) **Phase 1.5 — voice router port.** Two endpoints. Decision deferred — main loop works without it.
-3. **Phase 2 — containerization + local K8s.** Dockerfile for the FastAPI app, Helm chart, run on `kind` or `k3d`, push images to AWS ECR. **Don't use EKS** (control-plane cost — see `memory/company_tech_stack.md`).
+3. **Phase 2 — containerization + local K8s.** Dockerfile for the FastAPI app, Helm chart, run on `kind` or `k3d`, push images to AWS ECR. **Don't use EKS** (control-plane cost — see `context/PRACTICE_PROJECT.md`).
 4. Phase 3 — Keycloak + JWT auth.
 5. Phase 4 — OpenTofu to codify Neon project + ECR repo + Keycloak realm.
-6. Phase 5 — Flutter mobile companion (separate small app, see `memory/practice_architecture.md`).
+6. Phase 5 — Flutter mobile companion (separate small app, see `context/PRACTICE_PROJECT.md`).
 
 ---
 
