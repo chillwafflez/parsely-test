@@ -1,0 +1,34 @@
+# Default values for the parsely-api chart.
+# Override at install time with --set or -f my-values.yaml.
+
+image:
+  repository: parsely-api
+  tag: dev
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Existing Secret in the target namespace, created out-of-band via
+# api-py/k8s/create-secret.ps1. The chart does NOT create this — keeps
+# sensitive material out of the chart and out of git.
+existingSecret: parsely-api-secrets
+
+config:
+  azureDiEndpoint: https://taia-ams-docai.cognitiveservices.azure.com/
+  azureBlobContainer: uploads
+  corsAllowedOrigins: http://localhost:3000
+
+service:
+  type: ClusterIP
+  port: 5181
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10

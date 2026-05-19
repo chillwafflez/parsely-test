@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "parsely-api.fullname" . }}
+  labels:
+    {{- include "parsely-api.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "parsely-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "parsely-api.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Hash of the rendered ConfigMap. If the ConfigMap changes, this
+        # annotation changes, which forces a pod rollover. Without it,
+        # helm upgrade would update the ConfigMap but the running pod
+        # would keep its old env vars until manually restarted.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 5181
+          envFrom:
+            - configMapRef:
+                name: {{ include "parsely-api.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

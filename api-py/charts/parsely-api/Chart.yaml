@@ -1,0 +1,6 @@
+apiVersion: v2
+name: parsely-api
+description: Parsely document parsing API (FastAPI)
+type: application
+version: 0.1.0  # the chart version. Bump when the chart itself changes shape.
+appVersion: "0.1.0" # the application version inside the chart. Bump when the underlying parsely-api image changes — used as the default image tag.

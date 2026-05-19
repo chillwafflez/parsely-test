@@ -1,0 +1,12 @@
+# Patterns to skip when packaging the chart with `helm package`.
+.DS_Store
+.git/
+.gitignore
+.idea/
+.vscode/
+*.tmproj
+*.swp
+*.bak
+*.tmp
+*.orig
+.project
