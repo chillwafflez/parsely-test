@@ -1,0 +1,94 @@
+# codecentric/keycloakx Helm values overlay for the Parsely practice
+# deployment. Apply with:
+#
+#   helm repo add codecentric https://codecentric.github.io/helm-charts
+#   helm repo update
+#   helm install keycloak codecentric/keycloakx -n parsely \
+#     -f api-py/k8s/keycloak-values.yaml
+#
+# Prereqs (run api-py/k8s/create-keycloak-secrets.ps1 first):
+#   - Secret `keycloak-db` with keys: username, password
+#   - Secret `keycloak-admin` with keys: username, password
+
+image:
+  repository: quay.io/keycloak/keycloak
+  # Pin a specific minor. Bump deliberately when upgrading Keycloak.
+  tag: "26.0"
+
+replicas: 1
+
+# Tell the chart NOT to mount its auto-generated cache-ispn.xml. The
+# chart's default stack (`default`) resolves to a JGroups discovery
+# stack ('jdbc-ping') that Keycloak 26.5+ ships but doesn't register
+# the way the chart expects, so loading the config file crashes the
+# pod with `ISPN000540: No such JGroups stack 'jdbc-ping'`. `custom`
+# disables the file mount entirely; for single-replica dev mode
+# (start-dev below) Keycloak uses an internal local cache, which is
+# what we want.
+cache:
+  stack: custom
+
+# Override the chart's default startup args so Keycloak:
+#   - serves plain HTTP (no TLS — kind doesn't have certs)
+#   - relaxes hostname checks (we hit it via port-forward as localhost)
+#   - trusts forwarded-proto headers (placeholder for future ingress)
+command:
+  - "/opt/keycloak/bin/kc.sh"
+args:
+  # start-dev is Keycloak's "single-node development" mode. It
+  # implicitly:
+  #   - sets --cache=local (skips Infinispan clustering AND the
+  #     cache-config-file load — sidesteps the codecentric 7.1.x +
+  #     Keycloak 26.5+ jdbc-ping JGroups stack incompatibility)
+  #   - enables HTTP (no TLS required)
+  #   - relaxes hostname validation
+  # NOT for production. For our single-replica prototype it is the
+  # right mode; switch back to `start` with explicit hardening flags
+  # in a later phase when practicing prod deployment.
+  - "start-dev"
+
+# Skip the chart's "wait for DB" init container — sometimes races
+# Neon's compute cold-start. Keycloak's own startup retries the
+# connection plenty.
+dbchecker:
+  enabled: false
+
+# We bypass the chart's structured `database:` block and set KC_* env
+# vars directly. Reason: the chart can't build a JDBC URL with
+# `?sslmode=require`, which Neon requires.
+extraEnv: |
+  - name: KC_DB
+    value: postgres
+  - name: KC_DB_URL
+    value: "jdbc:postgresql://ep-blue-wave-ako2afwp.c-3.us-west-2.aws.neon.tech/keycloak?sslmode=require"
+  - name: KC_DB_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-db
+        key: username
+  - name: KC_DB_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-db
+        key: password
+  - name: KC_BOOTSTRAP_ADMIN_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-admin
+        key: username
+  - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-admin
+        key: password
+
+# Health + metrics endpoints — chart's liveness/readiness probes hit
+# these, so they must be enabled or the pod never becomes Ready.
+health:
+  enabled: true
+metrics:
+  enabled: true
+
+# Plain ClusterIP. We'll port-forward to reach the admin console for now.
+service:
+  type: ClusterIP
