@@ -26,8 +26,13 @@ from app.schemas.template import (
     TemplateSummary,
     UpdateTemplateRequest,
 )
+from app.security import get_current_user
 
-router = APIRouter(prefix="/api/templates", tags=["templates"])
+router = APIRouter(
+    prefix="/api/templates",
+    tags=["templates"],
+    dependencies=[Depends(get_current_user)],
+)
 logger = logging.getLogger(__name__)
 
 

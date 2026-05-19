@@ -32,11 +32,16 @@ from app.schemas.document import (
     UpdateTableCellRequest,
 )
 from app.schemas.field import ExtractedFieldResponse, field_to_response
+from app.security import get_current_user
 from app.services.blob_storage import BlobStorageService
 from app.services.document_intelligence import DocumentIntelligenceService
 from app.services.layout_storage import LayoutStorageService
 
-router = APIRouter(prefix="/api/documents", tags=["documents"])
+router = APIRouter(
+    prefix="/api/documents",
+    tags=["documents"],
+    dependencies=[Depends(get_current_user)],
+)
 logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024

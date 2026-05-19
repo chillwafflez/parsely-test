@@ -1,9 +1,14 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.catalog import document_types
 from app.schemas.document_types import DocumentTypeResponse
+from app.security import get_current_user
 
-router = APIRouter(prefix="/api/document-types", tags=["document-types"])
+router = APIRouter(
+    prefix="/api/document-types",
+    tags=["document-types"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @router.get("", response_model=list[DocumentTypeResponse])

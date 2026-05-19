@@ -24,11 +24,13 @@ from app.schemas.aggregation import (
     CreateAggregationRequest,
 )
 from app.schemas.field import ExtractedFieldResponse, field_to_response
+from app.security import get_current_user
 from app.services.layout_storage import LayoutStorageService
 
 router = APIRouter(
     prefix="/api/documents/{document_id}/aggregations",
     tags=["aggregations"],
+    dependencies=[Depends(get_current_user)],
 )
 
 

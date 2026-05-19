@@ -24,6 +24,44 @@ import type {
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:5180";
 
+// --- Auth wrapper -----------------------------------------------------------
+// Every FastAPI call goes through authedFetch(), which pulls the Keycloak
+// access_token out of the NextAuth session and attaches it as a Bearer
+// header. Cached for ~60s before the session's reported expiry so we don't
+// round-trip to /api/auth/session on every call.
+
+let cachedToken: { value: string; expiresAt: number } | null = null;
+
+async function getAccessToken(): Promise<string> {
+  if (cachedToken && cachedToken.expiresAt > Date.now()) {
+    return cachedToken.value;
+  }
+  // globalThis.fetch deliberately — calling authedFetch here would recurse.
+  const res = await globalThis.fetch("/api/auth/session", { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`Session lookup failed: ${res.status}`);
+  }
+  const session = await res.json();
+  if (!session?.accessToken) {
+    throw new Error("Not authenticated");
+  }
+  const expiresAt = session.expires
+    ? new Date(session.expires).getTime() - 60_000
+    : Date.now() + 60_000;
+  cachedToken = { value: session.accessToken, expiresAt };
+  return session.accessToken;
+}
+
+async function authedFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<Response> {
+  const token = await getAccessToken();
+  const headers = new Headers(init?.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  return globalThis.fetch(input, { ...init, headers });
+}
+
 export interface UploadOptions {
   /** Azure DI prebuilt model id. Defaults server-side to `prebuilt-invoice` when omitted. */
   modelId?: string;
@@ -49,7 +87,7 @@ export async function uploadDocument(
     formData.append("templateId", options.templateId);
   }
 
-  const res = await fetch(`${API_BASE}/api/documents/upload`, {
+  const res = await authedFetch(`${API_BASE}/api/documents/upload`, {
     method: "POST",
     body: formData,
   });
@@ -63,19 +101,19 @@ export async function uploadDocument(
 }
 
 export async function listDocumentTypes(): Promise<DocumentTypeOption[]> {
-  const res = await fetch(`${API_BASE}/api/document-types`, { cache: "no-store" });
+  const res = await authedFetch(`${API_BASE}/api/document-types`, { cache: "no-store" });
   if (!res.ok) throw new Error(`List document types failed: ${res.status}`);
   return res.json();
 }
 
 export async function listDocuments(): Promise<DocumentSummary[]> {
-  const res = await fetch(`${API_BASE}/api/documents`, { cache: "no-store" });
+  const res = await authedFetch(`${API_BASE}/api/documents`, { cache: "no-store" });
   if (!res.ok) throw new Error(`List failed: ${res.status}`);
   return res.json();
 }
 
 export async function getDocument(id: string): Promise<DocumentResponse> {
-  const res = await fetch(`${API_BASE}/api/documents/${id}`, { cache: "no-store" });
+  const res = await authedFetch(`${API_BASE}/api/documents/${id}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
   return res.json();
 }
@@ -89,7 +127,7 @@ export async function updateField(
   fieldId: string,
   update: FieldUpdate
 ): Promise<ExtractedField> {
-  const res = await fetch(
+  const res = await authedFetch(
     `${API_BASE}/api/documents/${documentId}/fields/${fieldId}`,
     {
       method: "PATCH",
@@ -110,7 +148,7 @@ export async function createField(
   documentId: string,
   payload: FieldCreate
 ): Promise<ExtractedField> {
-  const res = await fetch(`${API_BASE}/api/documents/${documentId}/fields`, {
+  const res = await authedFetch(`${API_BASE}/api/documents/${documentId}/fields`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -128,7 +166,7 @@ export async function deleteField(
   documentId: string,
   fieldId: string
 ): Promise<void> {
-  const res = await fetch(
+  const res = await authedFetch(
     `${API_BASE}/api/documents/${documentId}/fields/${fieldId}`,
     { method: "DELETE" }
   );
@@ -149,7 +187,7 @@ export async function updateTableCell(
   tableId: string,
   update: TableCellUpdate
 ): Promise<TableCell> {
-  const res = await fetch(
+  const res = await authedFetch(
     `${API_BASE}/api/documents/${documentId}/tables/${tableId}/cells`,
     {
       method: "PATCH",
@@ -177,7 +215,7 @@ export async function previewAggregation(
   documentId: string,
   payload: AggregationPreviewRequest
 ): Promise<AggregationPreviewResponse> {
-  const res = await fetch(
+  const res = await authedFetch(
     `${API_BASE}/api/documents/${documentId}/aggregations/preview`,
     {
       method: "POST",
@@ -205,7 +243,7 @@ export async function createAggregation(
   documentId: string,
   payload: CreateAggregationPayload
 ): Promise<ExtractedField> {
-  const res = await fetch(
+  const res = await authedFetch(
     `${API_BASE}/api/documents/${documentId}/aggregations`,
     {
       method: "POST",
@@ -225,13 +263,13 @@ export async function createAggregation(
 }
 
 export async function listTemplates(): Promise<TemplateSummary[]> {
-  const res = await fetch(`${API_BASE}/api/templates`, { cache: "no-store" });
+  const res = await authedFetch(`${API_BASE}/api/templates`, { cache: "no-store" });
   if (!res.ok) throw new Error(`List templates failed: ${res.status}`);
   return res.json();
 }
 
 export async function getTemplate(id: string): Promise<Template> {
-  const res = await fetch(`${API_BASE}/api/templates/${id}`, { cache: "no-store" });
+  const res = await authedFetch(`${API_BASE}/api/templates/${id}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Get template failed: ${res.status}`);
   return res.json();
 }
@@ -239,7 +277,7 @@ export async function getTemplate(id: string): Promise<Template> {
 export async function createTemplate(
   payload: CreateTemplatePayload
 ): Promise<Template> {
-  const res = await fetch(`${API_BASE}/api/templates`, {
+  const res = await authedFetch(`${API_BASE}/api/templates`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -254,7 +292,7 @@ export async function createTemplate(
 }
 
 export async function deleteTemplate(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/templates/${id}`, { method: "DELETE" });
+  const res = await authedFetch(`${API_BASE}/api/templates/${id}`, { method: "DELETE" });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Delete template failed (${res.status}): ${body || res.statusText}`);
@@ -265,7 +303,7 @@ export async function updateTemplate(
   id: string,
   payload: UpdateTemplateRequest
 ): Promise<Template> {
-  const res = await fetch(`${API_BASE}/api/templates/${id}`, {
+  const res = await authedFetch(`${API_BASE}/api/templates/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -280,7 +318,7 @@ export async function updateTemplate(
 }
 
 export async function duplicateTemplate(id: string): Promise<Template> {
-  const res = await fetch(`${API_BASE}/api/templates/${id}/duplicate`, {
+  const res = await authedFetch(`${API_BASE}/api/templates/${id}/duplicate`, {
     method: "POST",
   });
 
@@ -300,7 +338,7 @@ export async function duplicateTemplate(id: string): Promise<Template> {
 export async function exportTemplate(
   id: string
 ): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch(`${API_BASE}/api/templates/${id}/export`, {
+  const res = await authedFetch(`${API_BASE}/api/templates/${id}/export`, {
     cache: "no-store",
   });
 
@@ -318,7 +356,7 @@ export async function exportTemplate(
 export async function importTemplate(
   payload: TemplateExportPayload
 ): Promise<Template> {
-  const res = await fetch(`${API_BASE}/api/templates/import`, {
+  const res = await authedFetch(`${API_BASE}/api/templates/import`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -345,7 +383,7 @@ function parseContentDispositionFilename(header: string | null): string {
 }
 
 export async function fetchSpeechToken(): Promise<SpeechToken> {
-  const res = await fetch(`${API_BASE}/api/voice/token`, { cache: "no-store" });
+  const res = await authedFetch(`${API_BASE}/api/voice/token`, { cache: "no-store" });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(
@@ -358,7 +396,7 @@ export async function fetchSpeechToken(): Promise<SpeechToken> {
 export async function postVoiceFill(
   req: VoiceFillRequest
 ): Promise<VoiceFillResponse> {
-  const res = await fetch(`${API_BASE}/api/voice/fill`, {
+  const res = await authedFetch(`${API_BASE}/api/voice/fill`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
