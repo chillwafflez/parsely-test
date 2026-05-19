@@ -18,6 +18,9 @@ dependencies = [
     # Async transport backend used by both Azure SDKs above. Not pulled in
     # transitively — Azure SDKs support multiple backends and let the app pick.
     "aiohttp>=3.10",
+    # JWT validation against Keycloak's JWKS. The [crypto] extra pulls in
+    # `cryptography` for RS256 signature verification.
+    "pyjwt[crypto]>=2.10",
 ]
 
 [tool.uv]

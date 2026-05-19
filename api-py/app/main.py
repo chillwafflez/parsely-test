@@ -11,6 +11,7 @@ from app.routers import aggregations as aggregations_router
 from app.routers import document_types as document_types_router
 from app.routers import documents as documents_router
 from app.routers import templates as templates_router
+from app.security import CurrentUser, CurrentUserDep
 from app.services.blob_storage import BlobStorageService
 from app.services.document_intelligence import DocumentIntelligenceService
 from app.services.layout_storage import LayoutStorageService
@@ -64,3 +65,11 @@ async def health() -> dict[str, str]:
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
     return {"status": "ok"}
+
+
+@app.get("/me")
+async def me(user: CurrentUserDep) -> CurrentUser:
+    """Echoes the authenticated user. Exists so we can verify the auth
+    dependency end-to-end before applying it to the real routes in 3.5.
+    """
+    return user
