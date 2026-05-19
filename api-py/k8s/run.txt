@@ -1,0 +1,40 @@
+Run these from the repo root, in this order:
+
+# 1. Create the namespace first (everything else lives inside it)
+kubectl apply -f api-py/k8s/namespace.yaml
+
+# 2. Create the ConfigMap (referenced by the Deployment's envFrom)
+kubectl apply -f api-py/k8s/configmap.yaml
+
+# 3. Create the Secret using the helper script
+./api-py/k8s/create-secret.ps1
+
+# 4. Create the Deployment (it starts a Pod which reads ConfigMap + Secret)
+kubectl apply -f api-py/k8s/deployment.yaml
+
+# 5. Create the Service
+kubectl apply -f api-py/k8s/service.yaml
+
+Then watch the Pod come up:
+
+kubectl get pods -n parsely -w
+
+You should see it transition Pending → ContainerCreating → Running, and the READY column should flip from 0/1
+to 1/1 after the readiness probe passes (~10–15 seconds).
+
+Once it's 1/1 Running, port-forward and smoke-test:
+
+# In one terminal, leave this running:
+kubectl port-forward -n parsely svc/parsely-api 5181:5181
+
+# In another terminal:
+curl http://localhost:5181/health
+curl http://localhost:5181/api/documents
+
+kubectl port-forward opens a tunnel from your laptop's port 5181 → the Service's port 5181 → into the Pod.
+It's the easy way to reach a ClusterIP Service without setting up an Ingress.
+
+If anything goes sideways (Pod stuck in Pending, CrashLoopBackOff, ImagePullBackOff), the debug commands are:
+
+kubectl describe pod -n parsely -l app.kubernetes.io/name=parsely-api
+kubectl logs -n parsely -l app.kubernetes.io/name=parsely-api

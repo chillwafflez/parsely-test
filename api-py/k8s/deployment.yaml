@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parsely-api
+  namespace: parsely
+  labels:
+    app.kubernetes.io/name: parsely-api
+spec:
+
+  # how many copies and how to find them
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: parsely-api   # how Deployment knows which Pods belong to it (Pods it can manage have this label)
+                                            # must match the template labels below
+
+  # the Pod template (recipe for one Pod)
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: parsely-api # the labels every new Pod gets. Must match selector above
+    spec:
+      containers: # can have multiple containers in a Pod
+        - name: api
+          image: parsely-api:dev
+          # kind already loaded this image into the node's local cache, so
+          # we don't want K8s to try and pull it from a remote registry.
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 5181
+          # declares that the container listens on port 5181 and gives the port a name (http)
+          # this is so that the Service can reference it by name
+
+          envFrom:
+            # Plain config first, secrets second. If a key happens to exist
+            # in both, the later source wins — handy for overrides.
+            - configMapRef:
+                name: parsely-api-config
+            - secretRef:
+                name: parsely-api-secrets
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # - tells K8s: "before u send traffic to this Pod, hit this URL and make sure I'm okay"
+          # - if the probe fails, the Service stops sending the Pod traffic until it recovers
+          # - this hits the /health endpoint we made
+
+          resources:
+            requests: # "I need at least this much to be scheduled"
+              cpu: "100m"
+              memory: "256Mi"
+            limits:   # "end me if I exceed this"
+              memory: "512Mi"
+          # accounts for the resources of the Pod
+
+# - A Deployment is a controller that says "I want N copies of this Pod template running, forever. Heal them when they die. Roll them over carefully when I change something."

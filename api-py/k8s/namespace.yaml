@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: parsely
+
+# - every K8s object has these 4 top level fields
+# - a Namespace is purely organization, like a folder in a cluster
+#   - resources in a namespace don't collide with resources in another
+#   - we're putting everything into a 'parsely' namespace so we can easily delete if needed

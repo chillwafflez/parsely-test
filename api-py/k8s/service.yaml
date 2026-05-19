@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: parsely-api
+  namespace: parsely
+  labels:
+    app.kubernetes.io/name: parsely-api
+spec:
+  type: ClusterIP   # says the Service is only reachable from inside the cluster
+  selector:
+    app.kubernetes.io/name: parsely-api   # "any Pod with the label app.kubernetes.io/name=parsely-api is one of mine."
+  ports:
+    - name: http
+      port: 5181    # the port the Service itself listens on
+      targetPort: http    # the port on the Pod to forward to
+      protocol: TCP
+
+# - A Service is a stable network identity in front of a set of Pods
+# - we need it because:
+#   - Pods are disposable. When one restarts, it comes back with a new IP address
+#   - A Service gives Pods a fixed name and IP. It watches which Pods are alive and forwards traffic to them
+# - Clients only ever talk to a Service
