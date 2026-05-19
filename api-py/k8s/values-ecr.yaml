@@ -1,0 +1,20 @@
+# Helm values overlay for deploying from AWS ECR instead of the locally
+# kind-loaded image. Apply with:
+#
+#   helm upgrade parsely api-py/charts/parsely-api `
+#     --namespace parsely `
+#     -f api-py/k8s/values-ecr.yaml
+#
+# Edit the account ID below before first use. Find yours with:
+#   aws sts get-caller-identity --query Account --output text
+
+image:
+  repository: <YOUR_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/parsely-api
+  tag: v1
+  pullPolicy: IfNotPresent
+
+# References the docker-registry Secret created by
+# api-py/k8s/refresh-ecr-secret.ps1. The Secret must exist in the same
+# namespace as the Deployment before helm upgrade.
+imagePullSecrets:
+  - name: parsely-ecr-creds

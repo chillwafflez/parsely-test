@@ -6,6 +6,11 @@ image:
   tag: dev
   pullPolicy: IfNotPresent
 
+# Pull secrets for private registries. Empty by default — the kind-loaded
+# `parsely-api:dev` doesn't need one. Set in a values overlay (e.g.
+# api-py/k8s/values-ecr.yaml) when pulling from ECR.
+imagePullSecrets: []
+
 replicaCount: 1
 
 # Existing Secret in the target namespace, created out-of-band via
