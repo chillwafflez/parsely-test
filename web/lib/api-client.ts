@@ -119,7 +119,12 @@ export async function getDocument(id: string): Promise<DocumentResponse> {
 }
 
 export function fileUrl(id: string): string {
-  return `${API_BASE}/api/documents/${id}/file`;
+  // Same-origin URL — handled by web/app/api/documents/[id]/file/route.ts
+  // which proxies through to the FastAPI endpoint with the user's
+  // access token attached server-side. The browser sends its NextAuth
+  // session cookie automatically (same origin), no Authorization header
+  // needed on the <embed>/<iframe> tag.
+  return `/api/documents/${id}/file`;
 }
 
 export async function updateField(
