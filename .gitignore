@@ -40,3 +40,7 @@ ui-mocks
 # OS
 Thumbs.db
 .DS_Store
+
+# Infra
+infra/.terraform
+tfplan
