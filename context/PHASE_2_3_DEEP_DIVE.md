@@ -1,10 +1,11 @@
-# Phase 2 + 3 deep dive — how we used the new tech stack
+# Phase 2 + 3 + 4 deep dive — how we used the new tech stack
 
 This document is a beginner-friendly walkthrough of every step we took in
-Phases 2 and 3 of the practice rewrite, written so a future reader who's
-never touched Docker / Kubernetes / Helm / Keycloak can follow along.
+Phases 2, 3, and 4 of the practice rewrite, written so a future reader
+who's never touched Docker / Kubernetes / Helm / Keycloak / OpenTofu can
+follow along.
 
-**Scope:** the work between 2026-05-19 and 2026-05-20.
+**Scope:** the work between 2026-05-19 and 2026-05-22.
 
 **Tech covered:** Docker, .dockerignore, multi-stage builds, container
 registries, AWS ECR, Kubernetes (control plane vs workers, Pods,
@@ -13,7 +14,9 @@ readiness probes, imagePullSecrets), `kind`, `kubectl`, Helm (charts,
 templates, values, releases, install/upgrade/rollback), Keycloak (realms,
 clients, users, JWTs, JWKS), NextAuth.js (Auth.js v5) with Keycloak
 provider, PyJWT with PyJWKClient, FastAPI dependency injection for auth,
-the BFF (Backend-for-Frontend) proxy pattern for binary content.
+the BFF (Backend-for-Frontend) proxy pattern for binary content,
+**OpenTofu** (providers, resources, state file, import blocks, variables,
+sensitive inputs, the destroy + re-apply drill).
 
 **How to use this doc:** read top-to-bottom once to get the mental
 model, then come back to specific sections as a reference. The
@@ -1403,6 +1406,749 @@ upstream wants a token.
 
 ---
 
+# Phase 4 — Infrastructure as Code with OpenTofu
+
+**Goal:** stop clicking through three different cloud consoles (AWS,
+Neon, Keycloak) to set up infrastructure. Define every account-specific
+resource as code so the whole stack can be destroyed and rebuilt from
+`.tf` files in minutes, not hours.
+
+**End state:**
+- An `infra/` directory at the repo root holding 5 `.tf` files
+  (`providers.tf`, `variables.tf`, `ecr.tf`, `neon.tf`, `keycloak.tf`)
+- 3 providers configured (`hashicorp/aws`, `kislerdm/neon`, `keycloak/keycloak`)
+- 9 resources under Tofu management: AWS ECR repo, Neon project + 2
+  databases (`neondb`, `keycloak`) + admin role + dev branch + dev
+  endpoint, Keycloak realm + `parsely-web` client + `justin` user
+- Local state at `infra/terraform.tfstate` (gitignored)
+- Provider versions pinned in `infra/.terraform.lock.hcl` (committed)
+- Provider credentials and account-specific values supplied via env vars,
+  loaded from a gitignored `infra/.env`
+- The whole stack has been `tofu destroy`-ed and re-applied at least once
+  end-to-end as proof of reproducibility
+
+---
+
+## Mental models — what OpenTofu actually is
+
+Before the step-by-step, three concepts to internalize:
+
+### Provider, resource, state
+
+**OpenTofu is just a CLI** (`tofu`) that orchestrates plugins called
+**providers**. Each provider is a Go binary that wraps one external
+API. The AWS provider knows how to call AWS, the Neon provider knows
+how to call Neon's REST API, the Keycloak provider knows how to call
+Keycloak's admin API. Providers are downloaded from a registry
+(`registry.opentofu.org`) the first time you run `tofu init`.
+
+A **resource** in your `.tf` files is a declarative description of one
+thing that should exist in the world (a Neon project, an ECR repo, a
+Keycloak realm). Each resource has a **type** (owned by exactly one
+provider — `aws_ecr_repository` belongs to the AWS provider) and a
+**local name** (the label you give it inside your config, used to
+reference it elsewhere as `aws_ecr_repository.parsely_ecr_repository.X`).
+
+The **state file** (`terraform.tfstate`) is Tofu's memory of what it
+manages: for each resource block in your `.tf`, it records the
+real-world ID and the last-known attributes. Without state, Tofu has
+no way to know which Neon project belongs to which `resource` block.
+
+The cycle: edit `.tf` → `tofu plan` (Tofu reads `.tf` as *desired
+state*, reads the state file + calls provider APIs to find *real
+state*, computes the diff) → `tofu apply` (provider plugins make API
+calls to reconcile real → desired, state file is updated with the
+result).
+
+### Why OpenTofu and not Terraform
+
+OpenTofu is a fork of Terraform from 2023, after HashiCorp relicensed
+Terraform from MPL to BSL (Business Source License). Same HCL syntax,
+same provider ecosystem, same commands, just Apache 2.0 licensed and
+community-maintained. The two tools are interchangeable. We use
+OpenTofu specifically because:
+
+- The license is unambiguous (Terraform's BSL forbids competitive use,
+  whatever that means)
+- Providers published to Terraform's registry mirror to OpenTofu's
+- The CLI is `tofu` instead of `terraform`, otherwise identical
+- The user's company will likely adopt one of the two; practicing the
+  OSS fork hedges against future license changes
+
+Install on Windows: `winget install OpenTofu.Tofu`. Verify:
+`tofu version`.
+
+### What `import` blocks are for
+
+When you bring OpenTofu into a system that already has infrastructure
+(which we did — Phases 2 and 3 created Neon, Keycloak, and ECR
+resources by hand), Tofu doesn't know those resources exist. Two
+options:
+
+1. Destroy them and let Tofu re-create. Loses data.
+2. Tell Tofu "this thing already exists, please adopt it into state."
+
+That's what `import {}` blocks do — HCL syntax (OpenTofu 1.5+) that
+declares "the live resource with ID X should be tracked as resource
+address Y in my config." On the next `apply`, Tofu fetches the live
+resource via the provider's API, populates state with what it finds,
+and from that point on manages the resource normally.
+
+The pre-1.5 way was a CLI command (`terraform import <addr> <id>`).
+The block form is declarative, lives in your `.tf` files, and survives
+re-applies — friendlier for documentation and for the practice drill.
+
+---
+
+## Step 4.1 — Set up the `infra/` directory layout
+
+Two driving principles:
+1. **One file per concern.** Don't put all resources in `main.tf`;
+   split by domain so diffs stay readable.
+2. **Variables for everything environment-specific.** Account IDs,
+   project IDs, region — declared as variables, supplied via env vars.
+
+Layout:
+
+```
+infra/
+├── .gitignore           # .terraform/, *.tfstate, *.tfvars, .env, tfplan
+├── providers.tf         # required_providers + provider blocks
+├── variables.tf         # input variables (sensitive + non-sensitive)
+├── ecr.tf               # aws_ecr_repository
+├── neon.tf              # neon_project, neon_database, neon_branch, ...
+├── keycloak.tf          # keycloak_realm, keycloak_openid_client, keycloak_user
+├── .env                 # gitignored — sources env vars for tofu commands
+├── Load-Env.ps1         # sources .env into the current PowerShell session
+├── .terraform.lock.hcl  # provider version lockfile (commit this!)
+└── .terraform/          # provider binaries (gitignored)
+```
+
+The `.gitignore` is the single most important file in this directory.
+Three categories absolutely cannot be committed:
+- `*.tfstate` — Tofu's state file contains **every secret it has ever
+  touched in plaintext**. Imported Keycloak client secrets, Neon
+  passwords, all of it.
+- `*.tfvars`, `*.auto.tfvars` — typically hold sensitive variable
+  values.
+- `.env` — same reason.
+
+What you *do* commit:
+- All `*.tf` files
+- `.terraform.lock.hcl` (the provider version pin, like
+  `package-lock.json` for npm)
+
+## Step 4.2 — Configure the three providers
+
+`infra/providers.tf`:
+
+```hcl
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+    neon = {
+      source  = "kislerdm/neon"
+      version = "~> 0.3"
+    }
+    keycloak = {
+      source  = "keycloak/keycloak"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# Credentials come from env var: NEON_API_KEY
+provider "neon" {}
+
+# Credentials come from env vars:
+#   KEYCLOAK_URL, KEYCLOAK_CLIENT_ID, KEYCLOAK_CLIENT_SECRET
+provider "keycloak" {}
+```
+
+Key things to know:
+
+- **`required_providers`** lists the providers you need. `source` is
+  the full registry address (`namespace/name`); `version` is a
+  constraint (`~> 6.0` means `>= 6.0.0, < 7.0.0`).
+- **`provider "X" {}` blocks** configure how each provider authenticates
+  and where it points. We keep them mostly empty, deliberately. The
+  AWS provider needs `region`; the Neon and Keycloak providers read
+  everything from env vars natively.
+- **No credentials in `.tf` files.** Provider plugins read standard
+  env vars automatically (`AWS_PROFILE` for AWS, `NEON_API_KEY` for
+  Neon, `KEYCLOAK_URL` + `KEYCLOAK_CLIENT_ID` + `KEYCLOAK_CLIENT_SECRET`
+  for Keycloak). The .tf files stay safe to commit. Each collaborator
+  brings their own credentials.
+
+The Keycloak provider's source changed recently: it used to be
+`mrparkers/terraform-provider-keycloak`, but the project was donated to
+the Keycloak org and is now published as `keycloak/keycloak`. Some
+older blog posts and tutorials reference the old source — they'll
+still work via the registry's redirect, but the canonical source today
+is `keycloak/keycloak`.
+
+After writing this file:
+
+```powershell
+cd infra
+tofu init
+```
+
+`init` downloads the three provider binaries into
+`.terraform/providers/` (~250 MB total — AWS provider alone is ~200 MB)
+and writes `.terraform.lock.hcl` pinning the exact provider versions.
+
+## Step 4.3 — Bootstrap the Keycloak admin client
+
+This is the chicken-and-egg of IaC: **Tofu needs admin credentials to
+talk to Keycloak, but Keycloak is one of the things you want Tofu to
+manage.** You can't put the bootstrap credential under Tofu's
+management — Tofu would need that very credential to authenticate
+against itself.
+
+The pattern: **bootstrap a single admin client by hand once, then use
+it forever.** It exists outside Tofu's management.
+
+In the Keycloak admin console, logged in as the master admin:
+
+1. Switch to the **`master`** realm (dropdown top-left).
+2. Clients → Create client → Client ID: `tofu` → next.
+3. **Client authentication: ON**. Uncheck "Standard flow" and "Direct
+   access grants" (those are for end-user flows we don't need here).
+   Check **"Service accounts roles"**. Next.
+4. Leave URLs blank (no end-user redirects). Save.
+5. Credentials tab → copy the **Client secret**. This goes into
+   `KEYCLOAK_CLIENT_SECRET`.
+6. **Service account roles** tab → Assign role → from "Filter by realm
+   roles", assign **`admin`**. This is the master realm's built-in
+   admin role; it grants management authority over all realms.
+
+The `admin` role is a sledgehammer — for tighter scoping you'd use
+"Filter by clients" → `realm-management` (for the specific managed
+realm) → `realm-admin`. For a single-realm practice project, `admin`
+is fine and matches the Keycloak docs' recommended pattern for
+service-account admin clients.
+
+Two UI gotchas worth flagging because they tripped us up:
+
+- **The Service account roles tab doesn't appear until both "Client
+  authentication: ON" AND "Service accounts roles" checkbox in
+  Capability config are enabled.** Easy to enable the first and forget
+  the second.
+- **There are two confusingly-named items.** "Service accounts roles"
+  (the checkbox, capability config, plural-plural) enables the feature.
+  "Service account roles" (the tab, singular-plural) is where you
+  assign roles. Same feature, slightly different label.
+
+## Step 4.4 — The ECR resource
+
+The smallest possible resource declaration. `infra/ecr.tf`:
+
+```hcl
+resource "aws_ecr_repository" "parsely_ecr_repository" {
+  name                 = "parsely-api"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+```
+
+Three subtle things:
+
+- **`image_tag_mutability = "MUTABLE"`** lets you overwrite tags
+  (`:latest` works). `"IMMUTABLE"` forbids it — production prefers
+  immutable + SHA-pinned tags but practice scope is fine with mutable.
+- **`force_delete = true`** is critical for the destroy drill. Without
+  it, AWS refuses to delete a repo that contains images, and
+  `tofu destroy` errors out partway. We learned this the hard way.
+- **`encryption_type = "AES256"`** — must be exactly `"AES256"` or
+  `"KMS"`. Not `"AES"` (intuitive guess), not `"AES-256"`. Case and
+  format matter.
+
+Important conceptual point: **Tofu manages the *container*, not the
+*contents*.** ECR repos are infrastructure; the Docker images inside
+are application artifacts pushed by CI/CD or developers (`docker
+push`). After a `tofu destroy && tofu apply`, the repo is back but
+empty. You re-push the image manually (or in production, a CI job
+pushes on every commit).
+
+## Step 4.5 — The Neon resources
+
+`infra/neon.tf` is the largest of the resource files because Neon
+has the deepest resource tree:
+
+```hcl
+resource "neon_project" "parsely_neon_project" {
+  name                      = "parsely"
+  pg_version                = 17
+  org_id                    = var.neon_org_id
+  region_id                 = "aws-us-west-2"
+  history_retention_seconds = 21600  # 6h, free-tier max
+
+  # The default branch's name + default database + default role are
+  # configured INSIDE the neon_project resource, not as separate resources.
+  branch {
+    name          = "production"
+    database_name = "neondb"
+    role_name     = "neondb_owner"
+  }
+
+  # The default branch automatically gets a compute endpoint with these
+  # settings. Other branches need their own neon_endpoint resource.
+  default_endpoint_settings {
+    autoscaling_limit_min_cu = 0.25
+    autoscaling_limit_max_cu = 1.0
+  }
+}
+
+# A second role on the production branch (admin user separate from neondb_owner)
+resource "neon_role" "admin_user" {
+  project_id = neon_project.parsely_neon_project.id
+  branch_id  = neon_project.parsely_neon_project.default_branch_id
+  name       = "admin_user"
+}
+
+# A second database on the production branch for Keycloak's state
+resource "neon_database" "keycloak" {
+  project_id = neon_project.parsely_neon_project.id
+  branch_id  = neon_project.parsely_neon_project.default_branch_id
+  name       = "keycloak"
+  owner_name = "neondb_owner"   # NOT admin_user — match live ownership
+}
+
+# A development branch (copy-on-write fork of production)
+resource "neon_branch" "dev_branch" {
+  project_id = neon_project.parsely_neon_project.id
+  name       = "development"
+  parent_id  = neon_project.parsely_neon_project.default_branch_id
+}
+
+# Compute endpoint for the dev branch (so the SQL editor works on it)
+resource "neon_endpoint" "dev_endpoint" {
+  project_id               = neon_project.parsely_neon_project.id
+  branch_id                = neon_branch.dev_branch.id
+  type                     = "read_write"
+  autoscaling_limit_min_cu = 0.25
+  autoscaling_limit_max_cu = 1.0
+}
+```
+
+Concepts worth pinning down:
+
+1. **Project → branch → endpoint.** A *project* is the top-level
+   container. Each project has one or more *branches* (think git
+   branches for data — they share storage with copy-on-write). Each
+   branch needs a *compute endpoint* (a serverless Postgres instance)
+   before you can connect to it. The project's default branch gets
+   its endpoint via the `default_endpoint_settings {}` block;
+   additional branches need explicit `neon_endpoint` resources.
+2. **`default_branch_id` is a computed attribute** of `neon_project`.
+   It doesn't exist until the project is created/imported, but
+   references like `neon_project.parsely_neon_project.default_branch_id`
+   resolve correctly at plan time. A common mistake we hit:
+   `neon_branch.parsely_neon_project.default_branch_id` — that refers
+   to a `neon_branch` resource named `parsely_neon_project`, which
+   doesn't exist.
+3. **Database names: underscores, not hyphens.** Hyphens in Postgres
+   database names require double-quoting in every connection string
+   and SQL statement forever. `keycloak` and `keycloak_db` are fine;
+   `keycloak-database` is pain.
+4. **Database ownership matters.** When Neon creates a project, it
+   auto-creates a `neondb_owner` role that owns the default `neondb`
+   database. If you declare `owner_name = neon_role.admin_user.name`
+   on a database that actually has `neondb_owner` as its owner, Tofu's
+   plan will want to `ALTER DATABASE ... OWNER TO admin_user`, which
+   is non-trivial Postgres (requires no active connections, doesn't
+   transfer table-level ownership). Match live ownership in your .tf
+   unless you specifically want to migrate.
+
+## Step 4.6 — The Keycloak resources
+
+`infra/keycloak.tf`:
+
+```hcl
+resource "keycloak_realm" "parsely_keycloak" {
+  realm        = "parsely"
+  enabled      = true
+  display_name = "Parsely"
+
+  access_code_lifespan        = "1m"   # short-lived auth code = security default
+  default_signature_algorithm = "RS256"
+  password_policy             = "upperCase(1) and length(8) and notUsername"
+  ssl_required                = "external"
+
+  internationalization {
+    supported_locales = ["en", "de", "es"]
+    default_locale    = "en"
+  }
+
+  security_defenses {
+    brute_force_detection { max_login_failures = 30 ... }
+    headers { x_frame_options = "DENY" ... }
+  }
+}
+
+resource "keycloak_openid_client" "openid_client" {
+  realm_id              = keycloak_realm.parsely_keycloak.id
+  client_id             = "parsely-web"
+  name                  = "Parsely Web"
+  enabled               = true
+  access_type           = "CONFIDENTIAL"
+  standard_flow_enabled = true
+  use_refresh_tokens    = true
+
+  valid_redirect_uris = ["http://localhost:3000/api/auth/callback/keycloak"]
+  web_origins         = ["http://localhost:3000"]
+}
+
+resource "keycloak_user" "user" {
+  realm_id   = keycloak_realm.parsely_keycloak.id
+  username   = "justin"
+  enabled    = true
+  email      = "justin@parsely.local"
+  first_name = "Justin"
+  last_name  = "Time"
+
+  initial_password {
+    value     = var.justin_password
+    temporary = false
+  }
+}
+```
+
+Notable details:
+
+- **`access_code_lifespan = "1m"`** — the OIDC "authorization code" is
+  the short `?code=...` value on the redirect URL. The client exchanges
+  it for a token within seconds. Keep it short (default 1m) to limit
+  leak window. We initially had `"1h"` — that's a security smell.
+- **`client_id = "parsely-web"`** is the OIDC client identifier (what
+  your Next.js app sends in token requests). Different from `name`
+  (display label) and from the internal Keycloak UUID. These three
+  conflate easily.
+- **`access_type = "CONFIDENTIAL"`** with `standard_flow_enabled = true`
+  matches what NextAuth.js v5 expects: a confidential client doing the
+  authorization-code flow with a client secret. Keycloak auto-generates
+  the secret; we never declare it in .tf.
+- **`web_origins`** is the CORS allowlist for browser preflight to
+  Keycloak's token endpoint. Without it, the browser blocks the token
+  request from `localhost:3000`.
+- **`use_refresh_tokens = true`** explicitly enables refresh tokens.
+  Without this, sessions die when the access token expires (~5 min)
+  and the user has to log in again. With it, NextAuth silently renews.
+- **`initial_password`** sets the password on creation only. Updates
+  to `value` afterward have no effect — you'd need a separate
+  `keycloak_user_password` resource for ongoing management (which the
+  provider doesn't offer). For practice, this is fine.
+
+The password comes from a sensitive variable, declared in
+`infra/variables.tf`:
+
+```hcl
+variable "justin_password" {
+  description = "Initial password for the seeded Keycloak user."
+  type        = string
+  sensitive   = true
+}
+```
+
+The `sensitive = true` flag redacts the value in `plan`/`apply`
+terminal output. Note: **it does not encrypt the value in the state
+file** — sensitive values still land in `terraform.tfstate` in
+plaintext. The state file is the secret. Keep it gitignored.
+
+## Step 4.7 — Variables, env vars, and how secrets actually flow
+
+Three categories of "things from the environment" flow into Tofu:
+
+| Category | Read by | Set as |
+|---|---|---|
+| **Provider credentials** | The provider plugin, directly | Provider-native env vars: `AWS_PROFILE`, `NEON_API_KEY`, `KEYCLOAK_URL`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_CLIENT_SECRET` |
+| **Sensitive resource args** | Tofu, exposed as `var.X` | `TF_VAR_<variable_name>` with `sensitive = true` on the variable declaration |
+| **Non-sensitive environment-specific args** | Tofu, exposed as `var.X` | `TF_VAR_<variable_name>` (no sensitive flag) |
+
+The naming convention is mandatory: **`TF_VAR_<name>` prefix is what
+Tofu looks for** to populate `variable "<name>" {}`. Without that
+prefix, Tofu ignores it.
+
+Our `infra/variables.tf` declares:
+
+```hcl
+variable "justin_password"              { type = string, sensitive = true }
+variable "neon_org_id"                  { type = string }
+variable "neon_project_id"              { type = string }   # only used in import block
+variable "keycloak_parsely_client_uuid" { type = string }   # only used in import block
+variable "aws_region"                   { type = string, default = "us-east-1" }
+```
+
+Note `neon_org_id` is not sensitive — Neon org IDs aren't credentials,
+they're identifiers. But they're still account-specific (different
+collaborator → different value), so they belong in variables, not
+hard-coded.
+
+To make env-var management bearable on a Windows machine, we keep
+everything in a gitignored `infra/.env`:
+
+```
+NEON_API_KEY=...
+KEYCLOAK_URL=http://localhost:8080/auth
+KEYCLOAK_CLIENT_ID=tofu
+KEYCLOAK_CLIENT_SECRET=...
+TF_VAR_neon_org_id=org-...
+TF_VAR_neon_project_id=...
+TF_VAR_keycloak_parsely_client_uuid=...
+TF_VAR_justin_password=...
+```
+
+PowerShell doesn't read `.env` files natively, so a loader script
+(`infra/Load-Env.ps1`) sources it:
+
+```powershell
+Get-Content infra\.env | Where-Object { $_ -match '^\s*[^#]' } | ForEach-Object {
+  $name, $value = $_ -split '=', 2
+  Set-Item -Path "env:$($name.Trim())" -Value $value.Trim('"').Trim()
+}
+```
+
+Run `. .\Load-Env.ps1` (note the leading dot — dot-source) on a fresh
+shell to populate the current session's env vars.
+
+## Step 4.8 — Import blocks: adopting Phases 2 + 3's existing resources
+
+When Phase 4 started, the ECR repo, Neon project, and Keycloak realm
+already existed (created during Phases 2 and 3). Tofu didn't know.
+Options were destroy-and-recreate (loses data) or import.
+
+Import blocks in our `.tf` files:
+
+```hcl
+# infra/ecr.tf
+import {
+  to = aws_ecr_repository.parsely_ecr_repository
+  id = "parsely-api"
+}
+
+# infra/neon.tf
+import {
+  to = neon_project.parsely_neon_project
+  id = var.neon_project_id      # e.g. "curly-hill-90749853"
+}
+
+# infra/keycloak.tf
+import {
+  to = keycloak_realm.parsely_keycloak
+  id = "parsely"
+}
+
+import {
+  to = keycloak_openid_client.openid_client
+  id = "parsely/${var.keycloak_parsely_client_uuid}"
+}
+```
+
+Each provider has its own import-ID format:
+
+| Resource | Import ID format |
+|---|---|
+| `aws_ecr_repository` | `<repo_name>` |
+| `neon_project` | `<project_id>` (e.g. `curly-hill-90749853`) |
+| `neon_database` | `<project_id>/<branch_id>/<database_name>` |
+| `neon_role` | `<project_id>/<branch_id>/<role_name>` |
+| `keycloak_realm` | `<realm_name>` |
+| `keycloak_openid_client` | `<realm_name>/<client_uuid>` (NOT the client_id string) |
+| `keycloak_user` | `<realm_name>/<user_uuid>` |
+
+Two things tripped us up:
+
+1. **The Keycloak client UUID is not the `client_id`.** `parsely-web`
+   is the OIDC client identifier — what your apps know about. The
+   internal Keycloak UUID is something like
+   `1097c4d8-2ef6-4e35-92a4-fa3a0c8523e3` and is what import expects.
+   Get it from the admin UI (Clients → parsely-web → look at the URL)
+   or via API: `GET /admin/realms/parsely/clients?clientId=parsely-web`,
+   grab `.id`.
+
+2. **Import doesn't protect you from config drift.** If your live
+   resource has `region_id = "aws-us-west-2"` but your .tf says
+   `"aws-us-east-1"`, the import succeeds — and then the next plan
+   shows the resource needs to be replaced (because `region_id` is a
+   ForceNew attribute). That would destroy your data. **Always read
+   the post-import plan carefully** — if any imported resource shows
+   `will be destroyed` or `must be replaced`, fix your .tf to match
+   live, not the other way around.
+
+After a successful import, the `import {}` block can be removed or
+left in place. The state file remembers. We left them in for
+documentation and so the destroy-drill cycle can use them naturally.
+
+## Step 4.9 — The destroy + rebuild drill
+
+The reason Phase 4 isn't just "codify and stop" is that **IaC isn't
+real IaC until you've rebuilt from source.** Plenty of teams have .tf
+files that have never been re-applied from scratch because nobody
+dares delete production to test. The practice version:
+
+```powershell
+# Save the destroy plan so we can review before applying
+tofu plan -destroy -out=tfplan-destroy
+
+# READ THIS PLAN CAREFULLY. Every line should be "will be destroyed".
+# If anything says "will be created" or shows surprising attributes,
+# stop and investigate.
+tofu apply tfplan-destroy
+
+# Verify in each console (AWS, Neon, Keycloak admin) that resources
+# are actually gone.
+
+# Now rebuild from scratch
+tofu plan -out=tfplan
+# Should now show everything as "will be created". Imports are no-ops
+# when the resources don't exist (Tofu silently skips them).
+tofu apply tfplan
+```
+
+If both halves succeed end-to-end **and** the application still works
+after the rebuild, the IaC is real.
+
+What you learn during the drill that you can't learn during the
+initial codification:
+
+1. **Cross-provider dependency gaps.** Tofu builds a destroy order
+   from references inside .tf files. When two resources from different
+   providers depend on each other in real life but have no .tf
+   reference between them, Tofu has no visibility into the dependency.
+   Our case: the Keycloak service stores its realm config in the Neon
+   `keycloak` database. Tofu destroyed the database first, then tried
+   to call Keycloak's admin API to delete the realm, and got a 500
+   because Keycloak could no longer read its own data. The fix during
+   the drill: `helm uninstall keycloak` to take the broken service
+   down, then `tofu state rm` the Keycloak resources to tell Tofu
+   they're gone, then continue the destroy.
+
+2. **Unmanaged dependencies bite.** The Keycloak Helm release and the
+   `parsely-api` Helm release aren't in Tofu's scope. After Tofu
+   rebuilds the Neon project, the new endpoint hostname is different
+   — but the unmanaged Helm releases still point at the old hostname.
+   You manually update `keycloak-values.yaml`, re-install with the
+   new connection details, restart. Real production IaC would put the
+   Helm releases under the `hashicorp/helm` provider so Tofu could
+   reconcile them too.
+
+3. **Secret values change on recreate.** Every recreated resource
+   gets fresh credentials. After the drill:
+   - The Neon `neondb_owner` password is new → K8s secret
+     (`keycloak-db`) needs refreshing via
+     `./api-py/k8s/create-keycloak-secrets.ps1`
+   - The Keycloak `parsely-web` client secret is new →
+     `AUTH_KEYCLOAK_SECRET` in `web/.env.local` needs updating
+   - The Keycloak admin password is whatever you set in the new
+     install
+   - The `tofu` admin client is recreated, so its secret changes →
+     `KEYCLOAK_CLIENT_SECRET` env var needs updating
+   You hit each one in turn during the smoke test.
+
+4. **Database content doesn't survive.** Tofu manages the database
+   existence, not the rows inside. After re-apply, `neondb` exists but
+   has no tables. Run `cd api-py && alembic upgrade head` to recreate
+   the schema. This is by design — separation of infrastructure from
+   application state matches how production CI/CD would do it.
+
+These four observations are the actual Phase 4 deliverables. The .tf
+files are the artifact; the lessons are the value.
+
+## Step 4.10 — Recovery patterns when things go wrong
+
+A few operations that aren't documented loudly but you'll want:
+
+### `tofu state rm <addr>` — remove from state without destroying
+
+When a resource exists in your state but the real-world thing is gone
+(or you destroyed it manually), `tofu state rm` deletes the state
+entry without making any API calls. After running it:
+- The resource block in your `.tf` is now an "orphan" (Tofu doesn't
+  know about it)
+- Next `plan` will propose creating the resource (since it's declared
+  but not in state)
+- Or you can delete the resource block to make the orphan go away
+
+### `tofu destroy -target=<addr>` — destroy one resource
+
+Scopes destroy to a single resource. Useful when you want to
+selectively remove something. Caveat: Tofu still loads **all
+configured providers** at the start, so if one provider can't
+initialize (e.g. Keycloak service is down), even targeted destroys
+fail. Workaround: temporarily comment out the unreachable provider
+in `providers.tf` and rename its resource file to `.bak`.
+
+### `removed {}` block — declarative state removal
+
+The HCL equivalent of `tofu state rm`. From OpenTofu 1.7+:
+
+```hcl
+removed {
+  from = aws_instance.web
+  lifecycle {
+    destroy = false   # remove from state only; don't destroy in cloud
+  }
+}
+```
+
+Useful when migrating ownership of a resource between Tofu workspaces
+without disrupting the running thing. Less common than `state rm` but
+worth knowing exists.
+
+### `tofu destroy -target=neon_database.X` etc.
+
+The biggest gotcha we hit during the drill: an EMPTY ECR repository
+deletes fine; a non-empty one needs `force_delete = true` on the
+resource (set it BEFORE the destroy, requires an apply to take
+effect). Plan ahead.
+
+---
+
+## Step 4.11 — What we deliberately *didn't* codify
+
+For the practice scope, several things are intentionally outside Tofu:
+
+- **The `tofu` admin client in master realm.** Bootstrap problem;
+  see Step 4.3.
+- **The Keycloak Helm release** (`helm install keycloak ...`). Manual
+  for now. Future Phase 4.5+ work: bring it under `hashicorp/helm`
+  provider to close the dependency-graph gap.
+- **The `parsely-api` Helm release.** Same as above.
+- **The kind cluster itself** (`kind create cluster`). Local dev
+  artifact; codifying it isn't worth the complexity. Production would
+  use EKS or similar via the `aws_eks_cluster` resource.
+- **Container images in ECR.** Application artifacts, not
+  infrastructure. CI/CD's job.
+- **Neon's `neondb_owner` role and the auto-created default `neondb`
+  database.** These are created by Neon when the project is created
+  (configured inside the `neon_project.branch` block) — they're not
+  separate resources we can manage.
+- **K8s Secrets** (`keycloak-db`, `keycloak-admin`, `parsely-api-secrets`,
+  `parsely-ecr-creds`). The PowerShell scripts in `api-py/k8s/`
+  generate them. Future Phase 4.5: replace with Vault-injected
+  secrets via the Vault Agent Injector.
+
+The line between "Tofu's scope" and "outside Tofu's scope" is one of
+the more important architectural decisions in IaC adoption. In
+production you'd push that line further — bringing in Helm releases,
+K8s namespaces, IAM policies. For practice, the current scope already
+exposes every major pattern (variables, imports, secrets, ForceNew
+attributes, destroy ordering, the bootstrap problem).
+
+---
+
 # File index
 
 Files we created or significantly changed in Phases 2 and 3.
@@ -1460,6 +2206,27 @@ Files we created or significantly changed in Phases 2 and 3.
 
 - Existing: `DATABASE_URL`, `AZURE_*`
 - Added: `KEYCLOAK_ISSUER`
+
+## infra/ (Phase 4)
+
+- `providers.tf` — three `required_providers` entries + provider blocks
+- `variables.tf` — input variables (sensitive + non-sensitive)
+- `ecr.tf` — `aws_ecr_repository.parsely_ecr_repository`
+- `neon.tf` — `neon_project` + `neon_role` + `neon_database` + `neon_branch` + `neon_endpoint`
+- `keycloak.tf` — `keycloak_realm` + `keycloak_openid_client` + `keycloak_user`
+- `Load-Env.ps1` — sources `.env` into the current PowerShell session
+- `.gitignore` — excludes `.terraform/`, `*.tfstate`, `*.tfvars`, `.env`, `tfplan*`
+- `.terraform.lock.hcl` — provider version pin (commit this)
+
+## infra/.env (not committed)
+
+- `AWS_PROFILE` — picks an AWS credentials profile from `~/.aws/credentials`
+- `NEON_API_KEY` — Neon provider auth
+- `KEYCLOAK_URL`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_CLIENT_SECRET` — Keycloak provider auth
+- `TF_VAR_neon_org_id` — Neon organization ID (non-sensitive but env-specific)
+- `TF_VAR_neon_project_id` — existing Neon project ID for the import block
+- `TF_VAR_keycloak_parsely_client_uuid` — internal UUID of the parsely-web client
+- `TF_VAR_justin_password` — initial password for the seeded Keycloak user
 
 ---
 
@@ -1600,6 +2367,160 @@ the session cookie server-side, refetches FastAPI with a Bearer header,
 streams the result back. Browser sees a same-origin URL → cookie sent
 automatically → no header manipulation needed.
 
+## 10. Empty `required_providers` entry → `tofu init` succeeds, `plan` fails
+
+**Symptom:** `tofu init` reports success, but `tofu plan` errors with
+"could not find provider X" or similar.
+
+**Cause:** A `required_providers` entry like `keycloak = {}` declares
+the provider name but doesn't specify a `source`. Tofu has nothing to
+download.
+
+**Fix:** every entry needs `source` + `version`:
+```hcl
+keycloak = {
+  source  = "keycloak/keycloak"
+  version = "~> 5.0"
+}
+```
+
+## 11. AWS ECR `encryption_type = "AES"` rejected at plan time
+
+**Symptom:** `Inappropriate value for attribute "encryption_type"`.
+
+**Cause:** AWS provider expects exactly `"AES256"` or `"KMS"`. Not
+`"AES"` (intuitive guess), not `"AES-256"` (with hyphen). Case and
+format matter exactly.
+
+**Fix:** `encryption_type = "AES256"`.
+
+## 12. ForceNew attribute drift = destroy + recreate
+
+**Symptom:** Import block runs successfully, but the same plan shows
+`must be replaced` because some attribute (e.g. `region_id`) differs
+between .tf and live.
+
+**Cause:** Some attributes are immutable in the underlying API.
+Changing them doesn't update; it forces destroy + create. For Neon
+projects, `region_id` is ForceNew because you can't migrate data
+between regions.
+
+**Fix:** match live state in your .tf, not the other way around. If
+the live project is in `us-west-2`, your .tf says `"aws-us-west-2"`.
+Read post-import plans line by line.
+
+## 13. `tofu` provider can't reach Keycloak → all operations blocked
+
+**Symptom:** Any `tofu plan` / `destroy` / `apply` fails with
+"connection refused" or 401 from the Keycloak provider, even when
+operating on AWS-only resources via `-target`.
+
+**Cause:** Tofu initializes **all configured providers** before any
+operation. The Keycloak provider does an "initial login" handshake on
+init. If the port-forward isn't running, or credentials are wrong,
+every operation fails.
+
+**Fix during normal operation:** keep
+`kubectl port-forward -n parsely svc/keycloak-keycloakx-http 8080:80`
+running before any tofu command. **Fix for exceptional cases (e.g.
+finishing a destroy while Keycloak is intentionally down):** rename
+`infra/keycloak.tf` to `keycloak.tf.bak`, comment out the keycloak
+entry in `required_providers`, comment out `provider "keycloak" {}`,
+run `tofu init -upgrade`, do your work, then restore.
+
+## 14. `parsely-web` cannot be used as the Tofu admin client
+
+**Symptom:** Tried to point the Keycloak provider at the existing
+`parsely-web` client; got `unauthorized_client` errors.
+
+**Cause:** `parsely-web` is configured for end-user OIDC login
+(`standard_flow_enabled = true`, no service account). The
+`client_credentials` grant the Keycloak provider uses requires
+`service_accounts_enabled = true` and a corresponding service-account
+user with admin roles. Different purpose, different client config.
+
+**Fix:** create a separate admin client (we call ours `tofu`) in the
+**master** realm with Service Accounts Enabled and the `admin` role
+assigned to its service account. See Step 4.3.
+
+## 15. Service Account Roles tab is hidden until two settings are ON
+
+**Symptom:** Created a new admin client in Keycloak but there's no
+"Service Account Roles" tab where I can assign roles.
+
+**Cause:** The tab appears only when **both** "Client authentication:
+ON" AND "Service accounts roles" checkbox in Capability config are
+checked. Easy to enable the first and forget the second. Confusingly,
+the checkbox is plural-plural ("Service accounts roles") and the
+revealed tab is singular-plural ("Service account roles").
+
+**Fix:** Client → Settings → Capability config → check "Service
+accounts roles" → Save. Tab appears in the top row.
+
+## 16. Destroy fails mid-flow because Keycloak's database is gone
+
+**Symptom:** `tofu apply tfplan-destroy` deletes the Neon `keycloak`
+database, then errors with
+`error sending DELETE request to /auth/admin/realms/parsely: 500 Internal Server Error`.
+
+**Cause:** Cross-provider dependency gap. Tofu has no edge between the
+Neon `keycloak` database and the Keycloak `parsely_keycloak` realm
+(they're in different providers, no resource reference between them),
+so the destroy order is arbitrary. When the database goes first, the
+Keycloak service that backs the realm can't service further admin API
+calls.
+
+**Fix during the drill:** `helm uninstall keycloak -n parsely` to
+remove the broken service, then `tofu state rm keycloak_realm.X
+keycloak_openid_client.X keycloak_user.X` to tell Tofu those
+resources are already gone, then re-run the destroy. **Long-term
+fix:** bring the Keycloak Helm release under `hashicorp/helm` provider
+so Tofu can see the dependency.
+
+## 17. ECR destroy fails because the repo isn't empty
+
+**Symptom:** `tofu destroy` errors with `RepositoryNotEmptyException:
+The repository with name 'parsely-api' ... still contains images`.
+
+**Cause:** AWS refuses to delete a non-empty ECR repo by default.
+
+**Fix:** add `force_delete = true` to the `aws_ecr_repository`
+resource. You'll need to apply once with this attribute in place
+*before* the destroy works. Or manually delete images first via
+`aws ecr batch-delete-image`.
+
+## 18. asyncpg rejects `channel_binding=require` in connection strings
+
+**Symptom:** After updating `DATABASE_URL` to a new Neon connection
+string, `alembic upgrade head` or FastAPI startup fails with
+`TypeError: connect() got an unexpected keyword argument 'channel_binding'`.
+
+**Cause:** Neon's modern connection strings include
+`?sslmode=require&channel_binding=require` for SCRAM channel binding.
+Our `to_asyncpg_url` translates `sslmode` → `ssl` but doesn't strip
+`channel_binding` — and asyncpg doesn't recognize it as a connect
+parameter (it's a libpq-only feature).
+
+**Fix:** strip `channel_binding=require` from `DATABASE_URL` in
+`api-py/.env`. Or update `app/db.py:to_asyncpg_url` to drop unknown
+params via `urllib.parse.parse_qsl` + filter + `urlencode`.
+
+## 19. Renaming a `name` attribute on `neon_database` destroys data
+
+**Symptom:** Tofu plan shows destroy + recreate when changing a
+`neon_database.name` attribute, even though "renaming" feels safe.
+
+**Cause:** Postgres doesn't support in-place database rename in a way
+the Neon API exposes, so `name` is ForceNew. Tofu's only path is
+destroy + recreate, which loses everything inside.
+
+**Fix:** if the underlying database in Neon actually has a different
+name than what's in your .tf, you have two paths:
+- `tofu state rm` the database resource, then add an `import` block
+  pointing at the existing database with the correct name in the
+  resource block. This adopts the real database without recreating.
+- Or accept the rename (rarely what you want).
+
 ---
 
 # Commands cheat sheet
@@ -1688,6 +2609,60 @@ $tokenResp.access_token
 | FastAPI /me (test) | `http://localhost:5181/me` |
 | FastAPI /health (no auth) | `http://localhost:5181/health` |
 
+## OpenTofu (Phase 4)
+
+```powershell
+# One-time per machine
+winget install OpenTofu.Tofu
+tofu version
+
+# Once per fresh shell, source env vars
+cd infra
+. .\Load-Env.ps1
+
+# Initialize — downloads providers, writes .terraform.lock.hcl
+tofu init
+tofu init -upgrade          # re-download to honor updated version constraints
+
+# Validate — offline syntax + reference check
+tofu validate
+
+# Plan — show what apply would do, save to file
+tofu plan -out=tfplan
+tofu plan -destroy -out=tfplan-destroy
+
+# Apply — execute a saved plan exactly
+tofu apply tfplan
+tofu apply tfplan-destroy
+
+# Apply without a saved plan (re-plans first, prompts for yes)
+tofu apply
+tofu apply -auto-approve     # skip prompt — careful
+
+# Destroy — scoped or full
+tofu destroy -target=aws_ecr_repository.parsely_ecr_repository
+tofu destroy                 # destroys everything in state
+
+# State operations
+tofu state list              # all resources Tofu manages
+tofu state show <addr>       # detailed attributes of one resource
+tofu state rm <addr>         # forget about a resource without destroying it
+
+# Refresh — pull live state into the state file without changing anything
+tofu refresh
+
+# Inspect resolved variables / outputs
+tofu console                 # interactive HCL evaluator
+tofu output                  # list defined outputs
+
+# Format files canonically
+tofu fmt
+tofu fmt -recursive
+
+# Force replace a single resource on next apply
+tofu apply -replace=aws_ecr_repository.parsely_ecr_repository
+```
+
 ---
 
 # Citations — docs we consulted (via context7)
@@ -1715,6 +2690,18 @@ sources that mattered:
   environment variables, exposeAccessToken pattern)
 - **BuildKit attestations** — `moby/buildkit` (attestation manifest
   format, why we see three entries per push in ECR)
-
-For Phase 4 (OpenTofu), check `hashicorp/terraform` and the Neon
-Terraform provider docs.
+- **OpenTofu** — `opentofu/opentofu` (`import {}` block syntax,
+  `removed {}` block, `.terraform.lock.hcl` purpose, state file
+  semantics)
+- **HashiCorp AWS provider** — `hashicorp/terraform-provider-aws`
+  (credential resolution chain, AWS_PROFILE precedence, `force_delete`
+  on `aws_ecr_repository`, valid `encryption_type` values)
+- **Neon Terraform provider** — `neon.com/docs/reference/terraform`
+  (provider source `kislerdm/neon`, import ID formats for
+  `neon_project` / `neon_database` / `neon_role`, `default_branch_id`
+  computed attribute on `neon_project`, ForceNew on `region_id`)
+- **Keycloak Terraform provider** — `keycloak/terraform-provider-keycloak`
+  (donated from `mrparkers` org, new canonical source
+  `keycloak/keycloak`, client_credentials grant requirements, Service
+  Accounts Enabled checkbox, `initial_password` on `keycloak_user`,
+  realm-admin vs admin role assignment for service accounts)
