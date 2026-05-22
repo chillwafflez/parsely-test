@@ -1,15 +1,3 @@
-# adopt the existing 'parsely' realm into Tofu's state
-import {
-  to = keycloak_realm.parsely_keycloak
-  id = "parsely"
-}
-
-# adopt the existing 'parsely-web' client. The id is "<realm>/<client_uuid>"
-import {
-  to = keycloak_openid_client.openid_client
-  id = "parsely/${var.keycloak_parsely_client_uuid}"
-}
-
 # create keycloak realm
 resource "keycloak_realm" "parsely_keycloak" {
   realm             = "parsely"

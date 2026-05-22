@@ -60,7 +60,7 @@ extraEnv: |
   - name: KC_DB
     value: postgres
   - name: KC_DB_URL
-    value: "jdbc:postgresql://ep-blue-wave-ako2afwp.c-3.us-west-2.aws.neon.tech/keycloak?sslmode=require"
+    value: "jdbc:postgresql://ep-odd-hill-ak0rw40p.c-3.us-west-2.aws.neon.tech/keycloak?sslmode=require"
   - name: KC_DB_USERNAME
     valueFrom:
       secretKeyRef:

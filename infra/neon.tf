@@ -1,17 +1,3 @@
-# adopt the existing 'parsely' neon project into Tofu's state
-import {
-  to = neon_project.parsely_neon_project
-  id = var.neon_project_id
-}
-
-# adopt the existing keycloak table
-# - this is bcuz i messed up and created a "keycloak_database" db so i removed that but the 
-# "create new keycloak" step will fail because of duplicate-name
-import {
-	to = neon_database.keycloak
-	id = "${var.neon_project_id}/${neon_project.parsely_neon_project.default_branch_id}/keycloak"
-}
-
 # project resource
 resource "neon_project" "parsely_neon_project" {
   name       = "parsely"
